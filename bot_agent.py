@@ -178,7 +178,7 @@ def run_multi_agent_committee(data, original_query):
 """
 
     response = ai_client.models.generate_content(
-        model="gemini-flash-latest",
+        model="gemini-pro-latest",  # 切换为自动匹配最新稳定版的 Pro 模型
         contents=prompt
     )
 
