@@ -178,10 +178,9 @@ def run_multi_agent_committee(data, original_query):
 """
 
     response = ai_client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-flash-latest",
         contents=prompt
     )
-    return response.text
 
 @bot.message_handler(func=lambda msg: True)
 def handle_stock_inquiry(msg):
