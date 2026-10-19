@@ -106,7 +106,7 @@ def analyze_candidates_with_ai(candidates, client):
 3. 语言以中文为主，重要金融词汇附带英文。分为【5 大核心蓝筹】与【5 大中小盘异动股】两组输出。
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=prompt
     )
     return response.text
