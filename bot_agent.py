@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 import yfinance as yf
 from google import genai
@@ -11,6 +13,20 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 bot = telebot.TeleBot(BOT_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
+# 1. 虚设一个极简 Web 端口，满足 Render Free Web Service 的健康检查
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write("Bursa Stock Agent Bot is Running 24/7!".encode('utf-8'))
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
+# 2. 股票数据与 AI 分析逻辑
 def get_stock_data(query):
     clean = query.strip().upper()
     ticker_code = clean if clean.endswith(".KL") else clean + ".KL"
@@ -81,7 +97,6 @@ def run_multi_agent(data):
 
 @bot.message_handler(func=lambda msg: True)
 def handle_msg(msg):
-    # 安全验证，仅响应你自己的 Telegram ID
     if str(msg.chat.id) != str(ALLOWED_CHAT_ID):
         return
         
@@ -111,5 +126,8 @@ def handle_msg(msg):
         bot.edit_message_text(f"❌ 运行异常: {e}", chat_id=msg.chat.id, message_id=wait.message_id)
 
 if __name__ == "__main__":
+    # 启动后台 Web 端口（供 Render 免费层检测）
+    threading.Thread(target=run_web_server, daemon=True).start()
     print("Agent Bot is listening...")
+    # 启动 Telegram 消息监听
     bot.infinity_polling()
