@@ -1,0 +1,41 @@
+name: Bursa Market Accurate Tracker
+
+on:
+  schedule:
+    # 马来西亚时间 12:45 PM (UTC 04:45) - 避开 12:30 休市结算延时
+    - cron: '45 4 * * 1-5'
+    # 马来西亚时间 05:15 PM (UTC 09:15) - 避开 4:50 竞价盘与最终清算
+    - cron: '15 9 * * 1-5'
+  workflow_dispatch: # 允许你随时在 GitHub 网页上手动点击测试
+
+jobs:
+  track-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装所需依赖库
+        run: |
+          pip install requests pandas beautifulsoup4 google-genai
+
+      - name: 执行追踪脚本
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python tracker.py
+
+      - name: 保存并提交最新排名历史
+        run: |
+          git config --local user.email "tracker-bot@github.com"
+          git config --local user.name "Bursa Tracker Bot"
+          git add ranking_history.json
+          git commit -m "Auto-update ranking history" || exit 0
+          git push
