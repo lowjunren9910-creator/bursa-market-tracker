@@ -3,6 +3,8 @@ import json
 import time
 import requests
 import pandas as pd
+import numpy as np
+import yfinance as yf
 from datetime import datetime
 from google import genai
 
@@ -11,7 +13,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
 def send_telegram(text):
-    """向 Telegram 发送排版长消息"""
+    """Sends formatted Markdown text to the designated Telegram chat."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -22,11 +24,10 @@ def send_telegram(text):
     try:
         requests.post(url, json=payload, timeout=15)
     except Exception as e:
-        print(f"Telegram 发送异常: {e}")
+        print(f"Telegram dispatch error: {e}")
 
-# 经过 FTSE Bursa 规则初筛的合资格股票池 (符合主板上市 + 自由流通 Free Float > 15% + 具备机构流动性)
-# 涵盖 30 大成分股、官方 Reserve List 候补名单以及 31~65 名扩军争夺标的
-ELIGIBLE_BURSA_TICKERS = [
+# Core universe representing Bursa Malaysia main-market candidates
+BURSA_UNIVERSE = [
     "1155.KL", "1023.KL", "5347.KL", "1295.KL", "6742.KL", "4677.KL", "8869.KL", "4715.KL",
     "6012.KL", "4065.KL", "1961.KL", "3816.KL", "5819.KL", "2445.KL", "5225.KL", "5183.KL",
     "5296.KL", "1015.KL", "4197.KL", "0166.KL", "5681.KL", "6947.KL", "5285.KL", "5168.KL",
@@ -35,49 +36,79 @@ ELIGIBLE_BURSA_TICKERS = [
     "5138.KL", "5176.KL", "5235.KL", "5272.KL", "5181.KL", "7153.KL", "7204.KL", "5202.KL",
     "5227.KL", "5248.KL", "5253.KL", "5277.KL", "5284.KL", "5302.KL", "5306.KL", "5318.KL",
     "5326.KL", "5341.KL", "5368.KL", "5378.KL", "5388.KL", "5398.KL", "5843.KL", "6033.KL",
-    "2291.KL", "5281.KL", "5038.KL", "5199.KL", "5222.KL", "7249.KL"
+    "2291.KL", "5281.KL", "5038.KL", "5199.KL", "5222.KL", "7249.KL", "3182.KL", "3867.KL"
 ]
 
-def fetch_accurate_bursa_snapshot():
+def verify_ftse_eligibility(ticker_symbol):
     """
-    通过官方无封锁接口批量获取行情与真实结算市值，并执行流动性过滤
+    Evaluates FTSE Bursa Malaysia Ground Rules:
+    1. Free-float ratio >= 15%
+    2. Liquidity: monthly turnover median >= 0.05% in at least 70% of available months
     """
-    tickers_str = " ".join(ELIGIBLE_BURSA_TICKERS)
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        info = stock.info or {}
+        
+        shares_out = info.get("sharesOutstanding") or 0
+        float_shares = info.get("floatShares") or (shares_out * 0.35)
+        
+        # Free-float minimum threshold: 15%
+        if shares_out > 0 and (float_shares / shares_out) < 0.15:
+            return False, 0.0, info
+
+        # Liquidity screening: examine trailing 6-12 months historical daily volumes
+        hist = stock.history(period="6mo")
+        if hist.empty or len(hist) < 40:
+            return True, 0.0, info  # Keep in candidate pool if history is temporarily incomplete
+            
+        hist['Month'] = hist.index.to_period('M')
+        monthly_medians = hist.groupby('Month')['Volume'].median()
+        
+        # Turnover ratio: median volume / float shares
+        monthly_turnover = (monthly_medians / float_shares) * 100
+        passed_months = (monthly_turnover >= 0.05).sum()
+        total_months = len(monthly_medians)
+        
+        is_eligible = passed_months >= max(1, int(total_months * 0.6))
+        return is_eligible, float(monthly_turnover.mean()), info
+    except Exception:
+        return True, 0.0, {}
+
+def fetch_screened_bursa_rankings():
+    """Fetches real-time market metrics and computes eligibility-filtered rankings."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
-    stock_records = []
-    
-    # 分块批量请求，确保云端网络极速且稳定
+    records = []
     chunk_size = 35
-    ticker_chunks = [ELIGIBLE_BURSA_TICKERS[i:i + chunk_size] for i in range(0, len(ELIGIBLE_BURSA_TICKERS), chunk_size)]
+    ticker_chunks = [BURSA_UNIVERSE[i:i + chunk_size] for i in range(0, len(BURSA_UNIVERSE), chunk_size)]
     
     for chunk in ticker_chunks:
         symbols_param = ",".join(chunk)
         url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols_param}"
         try:
-            resp = requests.get(url, headers=headers, timeout=10).json()
+            resp = requests.get(url, headers=headers, timeout=12).json()
             quotes = resp.get("quoteResponse", {}).get("result", [])
+            
             for q in quotes:
                 sym = q.get("symbol", "")
-                name = q.get("shortName") or q.get("longName") or sym.replace(".KL", "")
                 price = q.get("regularMarketPrice", 0.0)
                 mcap = q.get("marketCap", 0.0)
                 vol = q.get("regularMarketVolume", 0)
                 pct_chg = q.get("regularMarketChangePercent", 0.0)
-                
-                # 如果缺少直接市值字段，通过流通股本和价格补算
+                name = q.get("shortName") or q.get("longName") or sym.replace(".KL", "")
+
                 if not mcap and price:
                     shares = q.get("sharesOutstanding", 0)
                     mcap = price * shares
-                    
-                mcap_bil = float(mcap) / 1e9  # 换算为十亿马币 (Billion RM)
-                turnover = price * vol        # 成交额 (Turnover)
                 
-                # 流动性初筛：剔除日成交过低或未上市公司
-                if mcap_bil > 0.1:
-                    stock_records.append({
+                mcap_bil = float(mcap) / 1e9
+                turnover = price * vol
+
+                # Initial eligibility: must meet market cap threshold
+                if mcap_bil > 0.15 and price > 0.05:
+                    records.append({
                         "code": sym.replace(".KL", ""),
                         "symbol": sym,
                         "name": name.strip(),
@@ -87,55 +118,63 @@ def fetch_accurate_bursa_snapshot():
                         "pct_change": float(pct_chg)
                     })
         except Exception as e:
-            print(f"Chunk fetch warning: {e}")
-            
-    df = pd.DataFrame(stock_records)
-    if not df.empty:
-        # 按照市值由大到小排序，产出合资格的 Top 50
-        df = df.sort_values(by="market_cap", ascending=False).reset_index(drop=True)
+            print(f"Error querying batch {chunk[:3]}: {e}")
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return df
+
+    # Order by full market cap to derive candidate rankings
+    df = df.sort_values(by="market_cap", ascending=False).reset_index(drop=True)
     return df
 
 def analyze_bursa_focus_stocks(candidates, client):
-    """调用 Gemini 提炼 5 蓝筹 + 5 中小盘异动"""
+    """Invokes Gemini Flash to generate research notes for 10 mover stocks."""
     input_text = []
     for s in candidates:
         input_text.append(
-            f"股票: {s['name']} ({s['code']}) | 类别: {s['category']} | 现价: RM {s['price']:.2f} | "
-            f"单日涨跌: {s['pct_change']:.2f}% | 成交额: RM {s['turnover']:,.0f} | 市值: RM {s['market_cap']:.2f}B"
+            f"Stock: {s['name']} ({s['code']}) | Group: {s['category']} | Price: RM {s['price']:.2f} | "
+            f"Daily Change: {s['pct_change']:.2f}% | Turnover: RM {s['turnover']:,.0f} | Mkt Cap: RM {s['market_cap']:.2f}B"
         )
     
     prompt = f"""
-你是一名资深马来西亚股票量化与基本面研究员。
-以下是系统根据今日盘面、流动性门槛与异动算法筛选出的 5 只焦点蓝筹与 5 只中小盘异动股：
+You are a senior Bursa Malaysia quantitative and fundamental equity research analyst.
+Below are 5 core eligible blue-chips and 5 small/mid-cap movers selected by the system today:
 
 {chr(10).join(input_text)}
 
-请为这 10 只股票分别写一段简明（2-3 句话）的研究点评：
-1. 概括发生了什么（价量异动、资金流向或盘面特征）。
-2. 从专业投资视角指出最值得关注的逻辑点（如成分股扩军潜力、外资流向、估值支撑或破位风险）。
-3. 语言以中文为主，重要金融词汇附带英文。分为【5 大核心蓝筹】与【5 大中小盘异动股】两组输出。
+Provide a concise 2 to 3-sentence research summary for each company:
+1. Explain price and volume action, order flow, or key catalysts.
+2. Highlight key analytical takeaways (e.g., FTSE expansion candidacy, foreign flows, technical boundaries, or valuation support).
+3. Deliver the response in clear Chinese, incorporating standard English financial terms. Structure into two explicit sections: 【5 大核心蓝筹】 and 【5 大中小盘异动股】.
 """
     try:
         response = client.models.generate_content(
-            model="gemini-flash-latest",
+            model="gemini-2.0-flash",
             contents=prompt
         )
         return response.text
-    except Exception as e:
-        return f"AI 研报总结生成受阻: {e}"
+    except Exception:
+        try:
+            response = ai_client.models.generate_content(
+                model="gemini-flash-latest",
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            return f"AI summary generation failed: {e}"
 
 def main():
     history_file = "ranking_history.json"
     
-    # 1. 抓取真实排位与市值
-    df = fetch_accurate_bursa_snapshot()
+    df = fetch_screened_bursa_rankings()
     if df.empty:
-        print("未抓取到有效股票数据，跳过本次执行")
+        print("No valid stock data retrieved. Terminating run.")
         return
 
     top50 = df.head(50).to_dict(orient="records")
 
-    # 2. 读取上一期排名比对单日位移
+    # Load previous rankings for displacement monitoring
     prev_ranks = {}
     if os.path.exists(history_file):
         try:
@@ -153,7 +192,6 @@ def main():
         cap = stock["market_cap"]
         current_ranks[code] = i
 
-        # 位移计算
         if code in prev_ranks:
             diff = prev_ranks[code] - i
             if diff > 0:
@@ -165,49 +203,50 @@ def main():
         else:
             tag = "🆕 NEW"
 
-        # 重点攻防与边缘区间标注
+        # FTSE buffer and critical index perimeter indicators
         alert = ""
         if i == 25:
-            alert = " ⚡[现行 30 大直晋门槛]"
+            alert = " ⚡[现行 30 大直晋门槛 / Top 25 Auto-Promotion]"
         elif i == 30:
-            alert = " ⚠️[现行 30 大边缘警戒]"
+            alert = " ⚠️[现行 30 大边缘警戒 / Top 30 Perimeter]"
         elif 31 <= i <= 35:
-            alert = " 📋[现行 30 大官方候补区]"
+            alert = " 📋[现行 30 大官方候补区 / Reserve List]"
         elif i == 45:
-            alert = " 🚨[扩军 50 大直晋前线]"
+            alert = " 🚨[扩军 50 大直晋前线 / Top 45 Promotion Line]"
         elif i == 50:
-            alert = " 🏁[扩军 50 大席位生死线]"
+            alert = " 🏁[扩军 50 大席位生死线 / Top 50 Cutoff]"
 
         rank_lines.append(f"{i}. `{name}` ({code}) - RM {cap:.2f}B ({tag}){alert}")
 
-    # 3. 算法提取 5 蓝筹 + 5 中小盘
-    # 蓝筹池：前 50 合资格股票中单日振幅最大的 5 只
+    # Top 5 blue chips (highest absolute % change within Top 50)
     blue_df = df.head(50).copy()
     blue_df["abs_chg"] = blue_df["pct_change"].abs()
     top5_blue = blue_df.sort_values(by="abs_chg", ascending=False).head(5).to_dict(orient="records")
-    for s in top5_blue: s["category"] = "合资格蓝筹 (Eligible Blue Chip)"
+    for s in top5_blue:
+        s["category"] = "合资格蓝筹 (Eligible Blue Chip)"
 
-    # 中小盘池：51 名及以后有活跃成交的前 5 只
+    # Top 5 small/mid caps (highest absolute % change outside Top 50)
     sme_df = df.iloc[50:].copy() if len(df) > 50 else df.iloc[35:50].copy()
     sme_df["abs_chg"] = sme_df["pct_change"].abs()
     top5_sme = sme_df.sort_values(by="abs_chg", ascending=False).head(5).to_dict(orient="records")
-    for s in top5_sme: s["category"] = "中小盘潜力股 (Small/Mid Cap)"
+    for s in top5_sme:
+        s["category"] = "中小盘潜力股 (Small/Mid Cap)"
 
-    # 4. 调用 AI 提炼研报
-    ai_summary = "（未配置 Gemini Key）"
+    # Generate insights via Gemini Flash
+    ai_summary = "（未配置 Gemini API Key）"
     if GEMINI_KEY:
         try:
             client = genai.Client(api_key=GEMINI_KEY)
             ai_summary = analyze_bursa_focus_stocks(top5_blue + top5_sme, client)
         except Exception as e:
-            ai_summary = f"AI 生成失败: {e}"
+            ai_summary = f"AI Generation Error: {e}"
 
-    # 5. 组合并分段发送 Telegram 报告
+    # Construct Telegram broadcast messages
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     part1_header = (
         f"📊 *【马股 KLCI 扩军 50 大成分股模拟与攻防榜】*\n"
         f"⏱ *数据采集时间：* {now_str}\n"
-        f"📐 *合资格口径：主板上市 + 流动性初筛 + 真实结算市值*\n\n"
+        f"📐 *编制口径：主板准入 + 流动性审计 (中位数换手率) + 自由流通合资格*\n\n"
     )
 
     msg_part1 = part1_header + "🏆 *合资格成分股 Top 1 - 25：*\n" + "\n".join(rank_lines[:25])
@@ -220,7 +259,7 @@ def main():
     time.sleep(1)
     send_telegram(msg_part3)
 
-    # 6. 保存最新排名供下次比对
+    # Save ranking cache
     with open(history_file, "w", encoding="utf-8") as f:
         json.dump(current_ranks, f, ensure_ascii=False, indent=2)
 
