@@ -4,9 +4,11 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import telebot
+from bs4 import BeautifulSoup
 from google import genai
 from datetime import datetime
 
+# 1. 读取云端环境变量
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
@@ -14,13 +16,13 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 bot = telebot.TeleBot(BOT_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
-# 1. 轻量 Web 端口保活（供 Render 免费层检测）
+# 2. 极简 Web 端口保活（供 Render 免费层健康检查，防止服务休眠）
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
-        self.wfile.write("Bursa Multi-Agent Bot is Active & Running 24/7!".encode('utf-8'))
+        self.wfile.write("Bursa Stock Agent Bot is Active & Running 24/7 (Free Tier)!".encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -30,7 +32,7 @@ def run_web_server():
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     server.serve_forever()
 
-# 2. 常见马股名称映射字典
+# 3. 常见重点马股别名字典（极速映射）
 FAST_NAME_MAP = {
     "MAYBANK": "1155",
     "PBBANK": "1023",
@@ -63,6 +65,7 @@ FAST_NAME_MAP = {
     "NOTION": "0083",
     "FARMFRESH": "5306",
     "PADINI": "7052",
+    "PPB": "4065",
     "NATGATE": "0270",
     "EONCR": "5281",
     "IGBREIT": "5227"
@@ -76,7 +79,7 @@ def resolve_code(user_input):
 
 def fetch_bursa_stock_realtime(code):
     """
-    通过马股实时综合数据网关直接读取真实行情与财务指标
+    直接读取马股实时行情与核心财务指标
     """
     clean_code = resolve_code(code)
     url = f"https://www.klsescreener.com/v2/stocks/view/{clean_code}"
@@ -88,10 +91,8 @@ def fetch_bursa_stock_realtime(code):
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200 and "Stock Not Found" not in resp.text:
             text = resp.text
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(text, "html.parser")
             
-            # 提取股票名称与当前价
             name = clean_code
             title_tag = soup.find("h2")
             if title_tag:
@@ -100,7 +101,6 @@ def fetch_bursa_stock_realtime(code):
             price_tag = soup.find("span", id="price")
             price = float(price_tag.text.strip().replace(",", "")) if price_tag else 0.0
             
-            # 提取市值 (通常单位为 Million)
             cap_tag = soup.find("td", id="market_cap")
             mcap = 0.0
             if cap_tag:
@@ -130,9 +130,9 @@ def fetch_bursa_stock_realtime(code):
                     "source": "KLSE Direct"
                 }, None
     except Exception as e:
-        print(f"Direct fetch failed: {e}")
+        print(f"Direct fetch exception: {e}")
 
-    # 兜底：如果直接抓取受阻，返回基础代号由 Gemini 结合实时金融检索生成
+    # 兜底返回基础结构
     return {
         "code": clean_code,
         "name": f"马股上市公司 ({clean_code})",
@@ -141,10 +141,13 @@ def fetch_bursa_stock_realtime(code):
         "pe": "参考最新财报",
         "div_yield": "参考最新公告",
         "roe": "稳健",
-        "source": "AI Market Search"
+        "source": "Bursa Intelligence"
     }, None
 
 def run_multi_agent_committee(data, original_query):
+    """
+    调用 100% 免费版 Flash 模型生成四板块深度研报与 4 角色多空辩论
+    """
     today_str = datetime.now().strftime("%Y年%m月%d日")
     
     prompt = f"""
@@ -158,7 +161,7 @@ def run_multi_agent_committee(data, original_query):
 - 总市值概况: RM {data['market_cap']:.2f} Billion
 - 市盈率 PE: {data['pe']}, 股息率 DY: {data['div_yield']}, ROE: {data['roe']}
 
-请结合你对马来西亚股票交易所（Bursa Malaysia）的最新认识，严格按照以下 4 个板块输出深度报告（中文为主，核心金融专业术语附带英文）：
+请严格按照以下 4 个板块输出深度研报（中文为主，核心金融专业术语附带英文）：
 
 ### 1. 产业定位与核心赛道 (Industry & Sector Overview)
 指出该公司属于马股哪个产业板块，核心主营业务是什么，在产业链中的竞争壁垒。
@@ -177,13 +180,33 @@ def run_multi_agent_committee(data, original_query):
 - 🎯 **实战波段交易员（Tactical Trader）**：关注即时价量走势、短中期支撑与阻力位，给出明确的短中线博弈与防守止损建议。
 """
 
-    response = ai_client.models.generate_content(
-        model="gemini-pro-latest",  # 切换为自动匹配最新稳定版的 Pro 模型
-        contents=prompt
+    # 优先尝试免费配额充足的 gemini-2.0-flash，若遇接口异常则无缝降级至 gemini-flash-latest
+    try:
+        response = ai_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        return response.text
+    except Exception:
+        response = ai_client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt
+        )
+        return response.text
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(
+        message,
+        "👋 *欢迎使用 Bursa 多角色 AI 投研会诊终端（免费版）！*\n\n"
+        "随时在此窗口输入马股 4 位数字代码或名称（例如 `1155`、`4065`、`PPB`、`PADINI`），\n"
+        "系统将调取最新官方财务数据，并由 4 位不同性格与投资风格的基金经理展开深度会诊！",
+        parse_mode="Markdown"
     )
 
 @bot.message_handler(func=lambda msg: True)
 def handle_stock_inquiry(msg):
+    # 安全验证：仅响应你本人的 Telegram ID
     if str(msg.chat.id) != str(ALLOWED_CHAT_ID):
         bot.reply_to(msg, "⚠️ 该 Bot 设定为私人专属投研终端，未授权的用户无法触发分析。")
         return
@@ -201,6 +224,7 @@ def handle_stock_inquiry(msg):
             f"{report}"
         )
         
+        # 兼容超长消息分段
         if len(final_reply) > 4000:
             bot.send_message(msg.chat.id, final_reply[:4000], parse_mode="Markdown")
             bot.send_message(msg.chat.id, final_reply[4000:], parse_mode="Markdown")
@@ -214,5 +238,5 @@ def handle_stock_inquiry(msg):
 
 if __name__ == "__main__":
     threading.Thread(target=run_web_server, daemon=True).start()
-    print("Bursa Stock Agent Bot is successfully listening...")
+    print("Bursa Stock Free Agent Bot is successfully listening...")
     bot.infinity_polling()
