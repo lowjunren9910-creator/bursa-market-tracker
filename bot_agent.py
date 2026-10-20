@@ -37,26 +37,20 @@ def run_multi_agent_committee(data, original_query):
 """
 
     # 免费模型候选池（按优先级排列）
-    candidate_models = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-2.5-flash"]
+    # 彻底弃用 gemini-3.8-flash，锁定 1,500 次/天的稳定免费模型池
+    candidate_models = ["gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
     last_err = None
 
     for model_name in candidate_models:
-        for attempt in range(2):  # 每个模型最多重试 2 次
-            try:
-                response = ai_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt
-                )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                err_str = str(e)
-                last_err = e
-                # 若遇到 503 服务器过载，短暂等待 2 秒后重试
-                if "503" in err_str or "UNAVAILABLE" in err_str:
-                    time.sleep(2)
-                    continue
-                else:
-                    break  # 若非过载错误，直接尝试下一个备选模型
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_err = e
+            continue
 
     raise last_err
