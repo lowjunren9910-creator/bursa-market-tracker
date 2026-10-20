@@ -1,149 +1,9 @@
-import os
-import json
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import requests
-import telebot
-from bs4 import BeautifulSoup
-from google import genai
-from datetime import datetime
-
-# 1. Environment Variables
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-
-bot = telebot.TeleBot(BOT_TOKEN)
-ai_client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
-
-# 2. Lightweight HTTP Daemon for Render Health Checks (Prevents 502 / Sleep)
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain; charset=utf-8')
-        self.end_headers()
-        self.wfile.write("Bursa Stock Agent Bot is Active & Running 24/7 (Free Tier)!".encode('utf-8'))
-
-    def log_message(self, format, *args):
-        return
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    server.serve_forever()
-
-# 3. Fast Ticker Name Mapping
-FAST_NAME_MAP = {
-    "MAYBANK": "1155",
-    "PBBANK": "1023",
-    "PUBLICBANK": "1023",
-    "TENAGA": "5347",
-    "TNB": "5347",
-    "CIMB": "1295",
-    "YTL": "4677",
-    "YTLPOWR": "6742",
-    "YTLPOWER": "6742",
-    "GAMUDA": "5296",
-    "IHH": "5225",
-    "INARI": "0166",
-    "GENTING": "3182",
-    "GENM": "4715",
-    "SIME": "4197",
-    "PETGAS": "6033",
-    "PCHEM": "5183",
-    "PETCHEM": "5183",
-    "MISC": "3816",
-    "IOICORP": "1961",
-    "KLK": "2445",
-    "MAXIS": "6012",
-    "CELCOMDIGI": "6947",
-    "CDB": "6947",
-    "RHBBANK": "1066",
-    "HLBANK": "5819",
-    "SUNWAY": "5211",
-    "MRDIY": "5296",
-    "NOTION": "0083",
-    "FARMFRESH": "5306",
-    "PADINI": "7052",
-    "PPB": "4065",
-    "NATGATE": "0270",
-    "EONCR": "5281",
-    "IGBREIT": "5227"
-}
-
-def resolve_code(user_input):
-    raw = user_input.strip().upper().replace(" ", "").replace(".KL", "")
-    if raw in FAST_NAME_MAP:
-        return FAST_NAME_MAP[raw]
-    return raw
-
-def fetch_bursa_stock_realtime(code):
-    """Fetches real-time stock quotes and key ratios from Bursa financial portals."""
-    clean_code = resolve_code(code)
-    url = f"https://www.klsescreener.com/v2/stocks/view/{clean_code}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-    
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200 and "Stock Not Found" not in resp.text:
-            text = resp.text
-            soup = BeautifulSoup(text, "html.parser")
-            
-            name = clean_code
-            title_tag = soup.find("h2")
-            if title_tag:
-                name = title_tag.text.strip()
-                
-            price_tag = soup.find("span", id="price")
-            price = float(price_tag.text.strip().replace(",", "")) if price_tag else 0.0
-            
-            cap_tag = soup.find("td", id="market_cap")
-            mcap = 0.0
-            if cap_tag:
-                try:
-                    mcap = float(cap_tag.text.strip().replace(",", "")) / 1000.0
-                except Exception:
-                    pass
-                    
-            pe_tag = soup.find("td", id="pe")
-            pe = pe_tag.text.strip() if pe_tag else "N/A"
-            
-            dy_tag = soup.find("td", id="dy")
-            dy = dy_tag.text.strip() if dy_tag else "N/A"
-            
-            roe_tag = soup.find("td", id="roe")
-            roe = roe_tag.text.strip() if roe_tag else "N/A"
-
-            if price > 0:
-                return {
-                    "code": clean_code,
-                    "name": name,
-                    "price": price,
-                    "market_cap": mcap,
-                    "pe": pe,
-                    "div_yield": dy,
-                    "roe": roe,
-                    "source": "KLSE Direct"
-                }, None
-    except Exception as e:
-        print(f"Direct fetch exception: {e}")
-
-    # Fallback structure
-    return {
-        "code": clean_code,
-        "name": f"马股上市公司 ({clean_code})",
-        "price": 0.0,
-        "market_cap": 0.0,
-        "pe": "参考最新财报",
-        "div_yield": "参考最新公告",
-        "roe": "稳健",
-        "source": "Bursa Intelligence"
-    }, None
+import time
 
 def run_multi_agent_committee(data, original_query):
-    """Calls Gemini Flash models on the 100% free tier to produce structured research."""
+    """
+    具备自动重试与多模型故障转移（Failover）的稳健调用机制
+    """
     today_str = datetime.now().strftime("%Y年%m月%d日")
     
     prompt = f"""
@@ -176,60 +36,27 @@ def run_multi_agent_committee(data, original_query):
 - 🎯 **实战波段交易员（Tactical Trader）**：关注即时价量走势、短中期支撑与阻力位，给出明确的短中线博弈与防守止损建议。
 """
 
-    try:
-        response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt
-        )
-        return response.text
-    except Exception:
-        response = ai_client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=prompt
-        )
-        return response.text
+    # 免费模型候选池（按优先级排列）
+    candidate_models = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-2.5-flash"]
+    last_err = None
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    bot.reply_to(
-        message,
-        "👋 *欢迎使用 Bursa 多角色 AI 投研会诊终端（免费版）！*\n\n"
-        "随时在此窗口输入马股 4 位数字代码或名称（例如 `1155`、`4065`、`PPB`、`PADINI`），\n"
-        "系统将调取最新官方财务数据，并由 4 位不同性格与投资风格的基金经理展开深度会诊！",
-        parse_mode="Markdown"
-    )
+    for model_name in candidate_models:
+        for attempt in range(2):  # 每个模型最多重试 2 次
+            try:
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                err_str = str(e)
+                last_err = e
+                # 若遇到 503 服务器过载，短暂等待 2 秒后重试
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    time.sleep(2)
+                    continue
+                else:
+                    break  # 若非过载错误，直接尝试下一个备选模型
 
-@bot.message_handler(func=lambda msg: True)
-def handle_stock_inquiry(msg):
-    if str(msg.chat.id) != str(ALLOWED_CHAT_ID):
-        bot.reply_to(msg, "⚠️ 该 Bot 设定为私人专属投研终端，未授权的用户无法触发分析。")
-        return
-
-    query_text = msg.text.strip()
-    wait_msg = bot.reply_to(msg, f"🔍 正在调取 `{query_text}` 官方数据并召集 4 位基金经理，请稍候约 5 秒...")
-
-    try:
-        data, err = fetch_bursa_stock_realtime(query_text)
-        report = run_multi_agent_committee(data, query_text)
-        
-        final_reply = (
-            f"📈 *【{data['name']} ({data['code']}) 投研会诊深度备忘录】*\n"
-            f"⏱ *研判基准时间：* {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-            f"{report}"
-        )
-        
-        if len(final_reply) > 4000:
-            bot.send_message(msg.chat.id, final_reply[:4000], parse_mode="Markdown")
-            bot.send_message(msg.chat.id, final_reply[4000:], parse_mode="Markdown")
-        else:
-            bot.send_message(msg.chat.id, final_reply, parse_mode="Markdown")
-            
-        bot.delete_message(chat_id=msg.chat.id, message_id=wait_msg.message_id)
-
-    except Exception as e:
-        bot.edit_message_text(f"❌ 运行异常: {e}", chat_id=msg.chat.id, message_id=wait_msg.message_id)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_web_server, daemon=True).start()
-    print("Bursa Stock Free Agent Bot is successfully listening...")
-    bot.infinity_polling()
+    raise last_err
