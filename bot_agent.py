@@ -178,7 +178,7 @@ def run_multi_agent_committee(data, original_query):
 """
 
     # 100% 免费层可用模型，带自动重试与故障转移
-    free_models = ["gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
+    free_models = ["gemini-2.0-flash", "gemini-flash-latest"]
     last_err = None
 
     for model_name in free_models:
