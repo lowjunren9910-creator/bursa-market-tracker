@@ -2,4 +2,6 @@ pyTelegramBotAPI
 yfinance
 pandas
 requests
+beautifulsoup4
 google-genai
+numpy
