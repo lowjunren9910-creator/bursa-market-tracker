@@ -2,29 +2,33 @@ name: Bursa Market Accurate Tracker
 
 on:
   schedule:
-    # 马来西亚时间 12:45 PM (UTC 04:45) - 周一至周五
-    - cron: '45 4 * * 1-5'
-    # 马来西亚时间 05:15 PM (UTC 09:15) - 周一至周五
-    - cron: '15 9 * * 1-5'
-  workflow_dispatch: # 允许网页上手动点击运行
+    # 09:30 UTC = 17:30 (5:30 PM) Malaysia Time (UTC+8), Monday through Friday
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch: # Allows manual one-click runs from GitHub Actions UI
+
+permissions:
+  contents: write
 
 jobs:
-  track-and-notify:
+  run-tracker:
     runs-on: ubuntu-latest
+
     steps:
-      - name: 检出仓库代码
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 配置 Python 环境
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: 安装所需依赖库
+      - name: Install Dependencies
         run: |
-          pip install requests pandas beautifulsoup4 google-genai yfinance
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: 执行追踪脚本
+      - name: Run Market Tracker Script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -32,10 +36,10 @@ jobs:
         run: |
           python tracker.py
 
-      - name: 保存并提交最新排名历史
+      - name: Commit & Push Updated Ranking History
         run: |
-          git config --local user.email "tracker-bot@github.com"
-          git config --local user.name "Bursa Tracker Bot"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add ranking_history.json
-          git commit -m "Auto-update ranking history" || exit 0
+          git commit -m "chore: update Bursa ranking history cache [skip ci]" || echo "No ranking displacement changes to commit."
           git push
